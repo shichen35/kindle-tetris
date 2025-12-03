@@ -1,0 +1,5 @@
+{
+	"items": [
+		{"name": "Tetris", "priority": 1, "action": "./tetris"}
+	]
+}
