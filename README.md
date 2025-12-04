@@ -1,6 +1,8 @@
 # Kindle Tetris
 Tetris clone written in C++ & GTK 2.0 for Amazon Kindle PW4+ (kindlehf).
 
+<img src="screenshot.png" width="30%" alt="Screenshot" />
+
 ## Features
 - 🎮 Classic Gameplay: Full implementation of core Tetris mechanics.
 - 📱 Kindle Optimized: Built with GTK 2.0 and Cairo for efficient rendering on e-ink displays.
