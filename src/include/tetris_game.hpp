@@ -2,6 +2,8 @@
 
 #include <array>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <random>
@@ -61,6 +63,7 @@ public:
     int level() const { return level_; }
     int lines() const { return lines_cleared_; }
     int speed_ms() const { return level_speeds_[level_]; }
+    int lines_to_next_level() const;
 
     void set_state_changed_cb(std::function<void()> cb) {
         state_changed_cb_ = std::move(cb);
@@ -101,9 +104,32 @@ private:
 
     static const std::array<Piece, BLOCK_TYPES> pieces_;
     inline static constexpr std::array<int, 5> rotation_kick_offsets_{0, -1, 1, -2, 2};
-    inline static constexpr std::chrono::milliseconds clear_effect_duration_{1500};
+    inline static constexpr std::chrono::milliseconds clear_effect_duration_{750};
     inline static constexpr std::chrono::milliseconds clear_effect_toggle_{250};
     inline static constexpr int game_over_fill_color_ = BLOCK_TYPES + 1;
+
+    inline static constexpr long double level_growth_factor_ = 1.4L;
+
+    static long long ceil_to_ll(long double x) {
+        constexpr long double eps = 1e-12L;
+        return static_cast<long long>(std::ceil(x - eps));
+    }
+    static long long lines_for_level(int n, long double r) {
+        if (n < 1 || !(r > 1.0L)) {
+            return 0;
+        }
+        return ceil_to_ll(10.0L * std::pow(r, static_cast<long double>(n - 1)));
+    }
+    static long long total_lines_to_level(int n, long double r) {
+        if (n < 1 || !(r > 1.0L)) {
+            return 0;
+        }
+        long long total = 0;
+        for (int i = 1; i <= n; ++i) {
+            total += lines_for_level(i, r);
+        }
+        return total;
+    }
 
     Board board_{};
     Phase phase_ = Phase::Idle;

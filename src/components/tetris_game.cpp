@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <limits>
 
 namespace {
 constexpr std::array<int, 4> lines_score{40, 100, 300, 1200};
@@ -268,9 +269,35 @@ void TetrisGame::update_level_and_score(int cleared_lines) {
     if (cleared_lines > 0) {
         lines_cleared_ += cleared_lines;
         add_score(lines_score[cleared_lines - 1] * (level_ + 1));
-        level_ = std::clamp(lines_cleared_ / 10, 0, 19);
+
+        int new_level = 0;
+        for (int i = 1; i <= 20; ++i) {
+            if (lines_cleared_ >= total_lines_to_level(i, level_growth_factor_)) {
+                new_level = i;
+            } else {
+                break;
+            }
+        }
+        level_ = std::clamp(new_level, 0, 19);
     }
     emit_stats();
+}
+
+int TetrisGame::lines_to_next_level() const {
+    int current_level = level_;
+    if (current_level >= 19) {
+        return 0;
+    }
+    int target_level = current_level + 1;
+    long long next_total = total_lines_to_level(target_level, level_growth_factor_);
+    long long remaining = next_total - static_cast<long long>(lines_cleared_);
+    if (remaining < 0) {
+        return 0;
+    }
+    if (remaining > std::numeric_limits<int>::max()) {
+        return std::numeric_limits<int>::max();
+    }
+    return static_cast<int>(remaining);
 }
 
 void TetrisGame::emit_state() {

@@ -1,6 +1,7 @@
 #include <gtk/gtk.h>
 #include <gdk/gdkkeysyms.h>
 #include <algorithm>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -18,6 +19,13 @@ public:
     void show();
 
 private:
+    struct LeaderboardEntry {
+        std::string name;
+        int score;
+        bool operator<(const LeaderboardEntry& other) const {
+            return score > other.score;
+        }
+    };
     struct WidgetDeleter {
         void operator()(GtkWidget* widget) const {
             if (widget) {
@@ -39,9 +47,12 @@ private:
     GtkWidget* score_label_ = nullptr;
     GtkWidget* level_label_ = nullptr;
     GtkWidget* lines_label_ = nullptr;
+    GtkWidget* next_level_label_ = nullptr;
     GtkWidget* status_label_ = nullptr;
     GtkWidget* pause_button_ = nullptr;
     GtkWidget* start_button_ = nullptr;
+    std::vector<LeaderboardEntry> leaderboard_;
+    std::string leaderboard_file_path_;
     struct TimeoutHandle {
         ~TimeoutHandle() { reset(); }
         void assign(guint id) {
@@ -63,8 +74,6 @@ private:
     TimeoutHandle timer_;
     TimeoutHandle animation_timer_;
     int current_interval_ = 0;
-    std::vector<GtkWidget*> resizable_buttons_;
-    int button_height_ = 56;
     std::unordered_map<guint, TetrisGame::Action> keymap_;
     static constexpr guint clear_animation_interval_ms_ = 250;
 
@@ -77,7 +86,6 @@ private:
     void create_arrow_controls(GtkWidget* table, GtkSizeGroup* size_group);
     GtkWidget* create_action_button(const char* label, TetrisGame::Action action, GtkSizeGroup* size_group);
     GtkWidget* create_button(const char* label, GCallback callback, gpointer data, GtkSizeGroup* size_group = nullptr);
-    void update_button_heights(int new_height);
     void update_labels();
     void update_status_text();
     void restart_game();
@@ -89,10 +97,15 @@ private:
     void handle_game_over();
     bool handle_key_press(guint keyval);
     void handle_action(TetrisGame::Action action);
+    void show_leaderboard();
+    void show_username_dialog();
+    void load_leaderboard();
+    void save_leaderboard();
+    void add_to_leaderboard(const std::string& name, int score);
+    bool is_high_score(int score) const;
     GtkWidget* window() const { return window_.get(); }
     gboolean on_key_press_event(GdkEventKey* event);
     void handle_destroy();
-    void handle_allocation(GtkAllocation* allocation);
 
     static gboolean tick_cb(gpointer data);
     static gboolean clear_tick_cb(gpointer data);
@@ -130,6 +143,9 @@ MainWindow::MainWindow() {
     constexpr int initial_block_size = 32;
     board_.reset(new TetrisBoard(game_, initial_block_size, true));
     initialize_game_callbacks();
+    
+    leaderboard_file_path_ = "leaderboard.txt";
+    load_leaderboard();
 
     window_ = adopt_widget(gtk_window_new(GTK_WINDOW_TOPLEVEL));
     gtk_widget_set_size_request(window(), config::desktop_width, config::desktop_height);
@@ -141,15 +157,6 @@ MainWindow::MainWindow() {
                          auto* self = static_cast<MainWindow*>(data);
                          if (self) {
                              self->handle_destroy();
-                         }
-                     }),
-                     this);
-    g_signal_connect(window(),
-                     "size-allocate",
-                     G_CALLBACK(+[](GtkWidget*, GtkAllocation* allocation, gpointer data) {
-                         auto* self = static_cast<MainWindow*>(data);
-                         if (self) {
-                             self->handle_allocation(allocation);
                          }
                      }),
                      this);
@@ -224,24 +231,6 @@ void MainWindow::build_layout() {
     GtkWidget* sidebar = gtk_vbox_new(FALSE, 8);
     gtk_box_pack_start(GTK_BOX(hbox_content), sidebar, FALSE, FALSE, 0);
     build_sidebar(sidebar);
-
-    GtkWidget* status_bar = gtk_alignment_new(0.0, 0.5, 1.0, 1.0);
-    GtkWidget* status_inner = gtk_hbox_new(FALSE, 4);
-    gtk_container_add(GTK_CONTAINER(status_bar), status_inner);
-    gtk_container_set_border_width(GTK_CONTAINER(status_inner), 4);
-
-    GtkWidget* status_title = gtk_label_new("Tetris on Kindle");
-    gtk_misc_set_alignment(GTK_MISC(status_title), 0.0, 0.5);
-    gtk_box_pack_start(GTK_BOX(status_inner), status_title, FALSE, FALSE, 4);
-
-    GtkWidget* status_spacer = gtk_label_new(nullptr);
-    gtk_box_pack_start(GTK_BOX(status_inner), status_spacer, TRUE, TRUE, 0);
-
-    status_label_ = gtk_label_new("Status: Ready");
-    gtk_misc_set_alignment(GTK_MISC(status_label_), 1.0, 0.5);
-    gtk_box_pack_end(GTK_BOX(status_inner), status_label_, FALSE, FALSE, 4);
-
-    gtk_box_pack_start(GTK_BOX(vbox_main), status_bar, FALSE, FALSE, 0);
 }
 
 void MainWindow::build_sidebar(GtkWidget* sidebar) {
@@ -256,25 +245,33 @@ void MainWindow::build_sidebar(GtkWidget* sidebar) {
     gtk_container_set_border_width(GTK_CONTAINER(stats_box), 6);
     create_stats_section(stats_box);
 
-    GtkWidget* control_frame = gtk_alignment_new(0.5, 0.0, 1.0, 0.0);
-    gtk_box_pack_start(GTK_BOX(sidebar), control_frame, FALSE, FALSE, 0);
-    GtkWidget* control_inner = gtk_vbox_new(FALSE, 3);
-    gtk_container_set_border_width(GTK_CONTAINER(control_inner), 2);
-    gtk_container_add(GTK_CONTAINER(control_frame), control_inner);
+    GtkWidget* sidebar_spacer = gtk_vbox_new(FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(sidebar), sidebar_spacer, TRUE, TRUE, 0);
+
+    GtkWidget* controls_frame = gtk_frame_new("Controls");
+    gtk_box_pack_start(GTK_BOX(sidebar), controls_frame, FALSE, FALSE, 0);
+
+    GtkWidget* controls_outer = gtk_alignment_new(0.5, 0.0, 1.0, 0.0);
+    gtk_container_add(GTK_CONTAINER(controls_frame), controls_outer);
+
+    GtkWidget* controls_vbox = gtk_vbox_new(FALSE, 8);
+    gtk_container_set_border_width(GTK_CONTAINER(controls_vbox), 6);
+    gtk_container_add(GTK_CONTAINER(controls_outer), controls_vbox);
+
+    GtkWidget* control_inner = gtk_vbox_new(FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(controls_vbox), control_inner, FALSE, FALSE, 0);
 
     GtkSizeGroup* control_size_group = gtk_size_group_new(GTK_SIZE_GROUP_HORIZONTAL);
     create_controls_section(control_inner, control_size_group);
 
-    GtkWidget* sidebar_spacer = gtk_vbox_new(FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(sidebar), sidebar_spacer, TRUE, TRUE, 0);
+    GtkWidget* controls_gap = gtk_vbox_new(FALSE, 0);
+    gtk_widget_set_size_request(controls_gap, -1, 50);
+    gtk_box_pack_start(GTK_BOX(controls_vbox), controls_gap, FALSE, FALSE, 0);
 
-    GtkWidget* arrow_box_outer = gtk_alignment_new(0.5, 1.0, 1.0, 0.0);
-    gtk_box_pack_start(GTK_BOX(sidebar), arrow_box_outer, FALSE, FALSE, 0);
     GtkWidget* arrow_controls_box = gtk_table_new(4, 2, TRUE);
     gtk_table_set_row_spacings(GTK_TABLE(arrow_controls_box), 3);
     gtk_table_set_col_spacings(GTK_TABLE(arrow_controls_box), 3);
-    gtk_container_set_border_width(GTK_CONTAINER(arrow_controls_box), 2);
-    gtk_container_add(GTK_CONTAINER(arrow_box_outer), arrow_controls_box);
+    gtk_box_pack_start(GTK_BOX(controls_vbox), arrow_controls_box, FALSE, FALSE, 0);
     create_arrow_controls(arrow_controls_box, control_size_group);
     g_object_unref(control_size_group);
 
@@ -295,9 +292,13 @@ void MainWindow::create_stats_section(GtkWidget* container) {
     create_row("Score:", &score_label_);
     create_row("Level:", &level_label_);
     create_row("Lines:", &lines_label_);
+    create_row("Next:", &next_level_label_);
 }
 
 void MainWindow::create_controls_section(GtkWidget* container, GtkSizeGroup* size_group) {
+    GtkWidget* row1 = gtk_hbox_new(TRUE, 6);
+    gtk_box_pack_start(GTK_BOX(container), row1, FALSE, TRUE, 0);
+    
     start_button_ = create_button("Start",
                                   G_CALLBACK(+[](GtkWidget*, gpointer data) {
                                       if (auto* self = static_cast<MainWindow*>(data)) {
@@ -306,7 +307,7 @@ void MainWindow::create_controls_section(GtkWidget* container, GtkSizeGroup* siz
                                   }),
                                   this,
                                   size_group);
-    gtk_box_pack_start(GTK_BOX(container), start_button_, FALSE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(row1), start_button_, TRUE, TRUE, 0);
 
     pause_button_ = create_button("Pause",
                                   G_CALLBACK(+[](GtkWidget*, gpointer data) {
@@ -317,7 +318,29 @@ void MainWindow::create_controls_section(GtkWidget* container, GtkSizeGroup* siz
                                   this,
                                   size_group);
     gtk_widget_set_sensitive(pause_button_, FALSE);
-    gtk_box_pack_start(GTK_BOX(container), pause_button_, FALSE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(row1), pause_button_, TRUE, TRUE, 0);
+
+    GtkWidget* row2 = gtk_hbox_new(TRUE, 6);
+    gtk_box_pack_start(GTK_BOX(container), row2, FALSE, TRUE, 0);
+
+    GtkWidget* leaderboard_button = create_button(
+        "Leaderboard",
+        G_CALLBACK(+[](GtkWidget*, gpointer data) {
+            if (auto* self = static_cast<MainWindow*>(data)) {
+                self->show_leaderboard();
+            }
+        }),
+        this,
+        size_group);
+    GtkWidget* lb_label = gtk_bin_get_child(GTK_BIN(leaderboard_button));
+    if (lb_label && GTK_IS_LABEL(lb_label)) {
+        gtk_label_set_line_wrap(GTK_LABEL(lb_label), TRUE);
+        gtk_label_set_justify(GTK_LABEL(lb_label), GTK_JUSTIFY_CENTER);
+    }
+    gtk_box_pack_start(GTK_BOX(row2), leaderboard_button, TRUE, TRUE, 0);
+
+    GtkWidget* row3 = gtk_hbox_new(TRUE, 6);
+    gtk_box_pack_start(GTK_BOX(container), row3, FALSE, TRUE, 0);
 
     GtkWidget* exit_button = create_button(
         "Exit",
@@ -326,7 +349,7 @@ void MainWindow::create_controls_section(GtkWidget* container, GtkSizeGroup* siz
         }),
         this,
         size_group);
-    gtk_box_pack_start(GTK_BOX(container), exit_button, FALSE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(row3), exit_button, TRUE, TRUE, 0);
 }
 
 void MainWindow::create_arrow_controls(GtkWidget* table, GtkSizeGroup* size_group) {
@@ -369,44 +392,32 @@ GtkWidget* MainWindow::create_action_button(const char* label, TetrisGame::Actio
         this,
         size_group);
     g_object_set_data(G_OBJECT(btn), kActionDataKey, encode_action(action));
+    gtk_widget_set_size_request(btn, -1, 70);
     return btn;
 }
 
 GtkWidget* MainWindow::create_button(const char* label, GCallback callback, gpointer data, GtkSizeGroup* size_group) {
     GtkWidget* btn = gtk_button_new_with_label(label);
     g_signal_connect(btn, "clicked", callback, data);
-    gtk_widget_set_size_request(btn, -1, button_height_);
-    resizable_buttons_.push_back(btn);
     if (size_group) {
         gtk_size_group_add_widget(size_group, btn);
     }
     return btn;
 }
 
-void MainWindow::update_button_heights(int new_height) {
-    int clamped = std::max(70, std::min(new_height, 200));
-    int scaled = static_cast<int>(clamped * 0.9);
-    if (scaled == button_height_) {
-        return;
-    }
-    button_height_ = scaled;
-    for (auto* btn : resizable_buttons_) {
-        if (btn) {
-            gtk_widget_set_size_request(btn, -1, button_height_);
-        }
-    }
-}
-
 void MainWindow::update_labels() {
-    if (!score_label_ || !level_label_ || !lines_label_) {
+    if (!score_label_ || !level_label_ || !lines_label_ || !next_level_label_) {
         return;
     }
     std::string score = std::to_string(game_.score());
     std::string level = std::to_string(game_.level());
     std::string lines = std::to_string(game_.lines());
+    int lines_to_next = game_.lines_to_next_level();
+    std::string next = std::to_string(lines_to_next);
     gtk_label_set_text(GTK_LABEL(score_label_), score.c_str());
     gtk_label_set_text(GTK_LABEL(level_label_), level.c_str());
     gtk_label_set_text(GTK_LABEL(lines_label_), lines.c_str());
+    gtk_label_set_text(GTK_LABEL(next_level_label_), next.c_str());
 }
 
 void MainWindow::update_status_text() {
@@ -521,14 +532,6 @@ void MainWindow::handle_destroy() {
     gtk_main_quit();
 }
 
-void MainWindow::handle_allocation(GtkAllocation* allocation) {
-    if (!allocation) {
-        return;
-    }
-    int target = allocation->height / 12;
-    update_button_heights(target);
-}
-
 gboolean MainWindow::tick_cb(gpointer data) {
     auto* self = static_cast<MainWindow*>(data);
     if (!self) {
@@ -542,6 +545,9 @@ gboolean MainWindow::tick_cb(gpointer data) {
         self->start_animation_timer();
         if (self->game_.is_game_over_animating() && self->pause_button_) {
             gtk_widget_set_sensitive(self->pause_button_, FALSE);
+            if (self->is_high_score(self->game_.score())) {
+                self->show_username_dialog();
+            }
         }
         return FALSE;
     }
@@ -592,4 +598,337 @@ gboolean MainWindow::clear_tick_cb(gpointer data) {
     }
 
     return TRUE;
+}
+
+void MainWindow::load_leaderboard() {
+    leaderboard_.clear();
+    std::ifstream file(leaderboard_file_path_);
+    if (!file.is_open()) {
+        return;
+    }
+    
+    std::string name;
+    int score;
+    while (file >> name >> score) {
+        leaderboard_.push_back({name, score});
+    }
+    
+    std::sort(leaderboard_.begin(), leaderboard_.end());
+    if (leaderboard_.size() > 10) {
+        leaderboard_.resize(10);
+    }
+}
+
+void MainWindow::save_leaderboard() {
+    std::ofstream file(leaderboard_file_path_);
+    if (!file.is_open()) {
+        return;
+    }
+    
+    for (const auto& entry : leaderboard_) {
+        file << entry.name << " " << entry.score << "\n";
+    }
+}
+
+void MainWindow::add_to_leaderboard(const std::string& name, int score) {
+    leaderboard_.push_back({name, score});
+    std::sort(leaderboard_.begin(), leaderboard_.end());
+    if (leaderboard_.size() > 10) {
+        leaderboard_.resize(10);
+    }
+    save_leaderboard();
+}
+
+bool MainWindow::is_high_score(int score) const {
+    if (score <= 0) {
+        return false;
+    }
+    if (leaderboard_.size() < 10) {
+        return true;
+    }
+    return score > leaderboard_.back().score;
+}
+
+void MainWindow::show_leaderboard() {
+    GtkWidget* dialog = gtk_dialog_new();
+    gtk_window_set_title(GTK_WINDOW(dialog), "L:D_N:dialog_PC:T_ID:tetris.leaderboard");
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 560, 680);
+    gtk_container_set_border_width(GTK_CONTAINER(dialog), 22);
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+
+    GtkWidget* content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    
+    GtkWidget* main_vbox = gtk_vbox_new(FALSE, 10);
+    gtk_container_add(GTK_CONTAINER(content_area), main_vbox);
+    
+    GtkWidget* title_label = gtk_label_new("Leaderboard - Top 10");
+    gtk_box_pack_start(GTK_BOX(main_vbox), title_label, FALSE, FALSE, 5);
+    
+    GtkWidget* table_vbox = gtk_vbox_new(FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(main_vbox), table_vbox, TRUE, TRUE, 5);
+    
+    if (leaderboard_.empty()) {
+        GtkWidget* label = gtk_label_new("No scores yet!");
+        gtk_box_pack_start(GTK_BOX(table_vbox), label, FALSE, FALSE, 10);
+    } else {
+        GtkWidget* header_hbox = gtk_hbox_new(FALSE, 10);
+        gtk_box_pack_start(GTK_BOX(table_vbox), header_hbox, FALSE, FALSE, 6);
+
+        GtkWidget* rank_header = gtk_label_new("Rank");
+        gtk_misc_set_alignment(GTK_MISC(rank_header), 0.0, 0.5);
+        gtk_widget_set_size_request(rank_header, 60, -1);
+        gtk_box_pack_start(GTK_BOX(header_hbox), rank_header, FALSE, FALSE, 0);
+
+        GtkWidget* name_header = gtk_label_new("Name");
+        gtk_misc_set_alignment(GTK_MISC(name_header), 0.0, 0.5);
+        gtk_box_pack_start(GTK_BOX(header_hbox), name_header, TRUE, TRUE, 0);
+
+        GtkWidget* score_header = gtk_label_new("Score");
+        gtk_misc_set_alignment(GTK_MISC(score_header), 1.0, 0.5);
+        gtk_widget_set_size_request(score_header, 120, -1);
+        gtk_box_pack_end(GTK_BOX(header_hbox), score_header, FALSE, FALSE, 0);
+
+        GtkWidget* header_sep = gtk_hseparator_new();
+        gtk_box_pack_start(GTK_BOX(table_vbox), header_sep, FALSE, FALSE, 6);
+
+        for (size_t i = 0; i < leaderboard_.size(); ++i) {
+            GtkWidget* row_event_box = gtk_event_box_new();
+            gtk_box_pack_start(GTK_BOX(table_vbox), row_event_box, FALSE, FALSE, 0);
+
+            GtkWidget* row_hbox = gtk_hbox_new(FALSE, 10);
+            gtk_container_add(GTK_CONTAINER(row_event_box), row_hbox);
+            gtk_container_set_border_width(GTK_CONTAINER(row_hbox), 6);
+
+            std::string rank_text = std::to_string(i + 1);
+            GtkWidget* rank_label = gtk_label_new(rank_text.c_str());
+            gtk_misc_set_alignment(GTK_MISC(rank_label), 0.0, 0.5);
+            gtk_widget_set_size_request(rank_label, 60, -1);
+            gtk_box_pack_start(GTK_BOX(row_hbox), rank_label, FALSE, FALSE, 0);
+
+            GtkWidget* name_label = gtk_label_new(leaderboard_[i].name.c_str());
+            gtk_misc_set_alignment(GTK_MISC(name_label), 0.0, 0.5);
+            gtk_box_pack_start(GTK_BOX(row_hbox), name_label, TRUE, TRUE, 0);
+
+            std::string score_text = std::to_string(leaderboard_[i].score);
+            GtkWidget* score_label = gtk_label_new(score_text.c_str());
+            gtk_misc_set_alignment(GTK_MISC(score_label), 1.0, 0.5);
+            gtk_widget_set_size_request(score_label, 120, -1);
+            gtk_box_pack_end(GTK_BOX(row_hbox), score_label, FALSE, FALSE, 0);
+        }
+    }
+    
+    GtkWidget* separator2 = gtk_hseparator_new();
+    gtk_box_pack_start(GTK_BOX(main_vbox), separator2, FALSE, FALSE, 0);
+    
+    GtkWidget* button_align = gtk_alignment_new(0.5, 0.5, 1.0, 0.0);
+    gtk_alignment_set_padding(GTK_ALIGNMENT(button_align), 10, 10, 20, 20);
+    gtk_box_pack_start(GTK_BOX(main_vbox), button_align, FALSE, FALSE, 0);
+    
+    GtkWidget* button_box = gtk_hbox_new(TRUE, 10);
+    gtk_container_add(GTK_CONTAINER(button_align), button_box);
+    
+    GtkWidget* clear_button = gtk_button_new_with_label("Clear");
+    g_signal_connect(clear_button, "clicked",
+                     G_CALLBACK(+[](GtkWidget* widget, gpointer data) {
+                         auto* self = static_cast<MainWindow*>(data);
+                         if (self) {
+                             self->leaderboard_.clear();
+                             self->save_leaderboard();
+                             gtk_widget_destroy(gtk_widget_get_toplevel(widget));
+                         }
+                     }),
+                     this);
+    gtk_box_pack_start(GTK_BOX(button_box), clear_button, TRUE, TRUE, 0);
+    
+    GtkWidget* exit_button = gtk_button_new_with_label("Exit");
+    gtk_box_pack_start(GTK_BOX(button_box), exit_button, TRUE, TRUE, 0);
+    
+    g_signal_connect_swapped(exit_button, "clicked",
+                             G_CALLBACK(gtk_widget_destroy), dialog);
+    
+    gtk_widget_show_all(dialog);
+}
+
+void MainWindow::show_username_dialog() {
+    GtkWidget* dialog = gtk_dialog_new();
+    gtk_window_set_title(GTK_WINDOW(dialog), "L:D_N:dialog_PC:T_ID:tetris.username");
+    gtk_window_set_default_size(GTK_WINDOW(dialog), 560, 720);
+    gtk_container_set_border_width(GTK_CONTAINER(dialog), 30);
+    gtk_window_set_modal(GTK_WINDOW(dialog), TRUE);
+
+    GtkWidget* content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
+    
+    GtkWidget* main_vbox = gtk_vbox_new(FALSE, 15);
+    gtk_container_add(GTK_CONTAINER(content_area), main_vbox);
+    
+    GtkWidget* title_label = gtk_label_new("<b><big>New High Score!</big></b>");
+    gtk_label_set_use_markup(GTK_LABEL(title_label), TRUE);
+    gtk_box_pack_start(GTK_BOX(main_vbox), title_label, FALSE, FALSE, 5);
+    
+    GtkWidget* separator1 = gtk_hseparator_new();
+    gtk_box_pack_start(GTK_BOX(main_vbox), separator1, FALSE, FALSE, 0);
+    
+    std::string score_text = "Your score: " + std::to_string(game_.score());
+    GtkWidget* score_label = gtk_label_new(score_text.c_str());
+    gtk_misc_set_alignment(GTK_MISC(score_label), 0.5, 0.5);
+    gtk_box_pack_start(GTK_BOX(main_vbox), score_label, FALSE, FALSE, 10);
+    
+    GtkWidget* prompt_label = gtk_label_new("Enter your name (up to 10 letters):");
+    gtk_box_pack_start(GTK_BOX(main_vbox), prompt_label, FALSE, FALSE, 5);
+    
+    GtkWidget* entry = gtk_entry_new();
+    gtk_entry_set_max_length(GTK_ENTRY(entry), 10);
+    gtk_entry_set_editable(GTK_ENTRY(entry), FALSE);
+    gtk_box_pack_start(GTK_BOX(main_vbox), entry, FALSE, FALSE, 5);
+    
+    // Virtual keyboard
+    GtkWidget* keyboard_vbox = gtk_vbox_new(FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(main_vbox), keyboard_vbox, FALSE, FALSE, 5);
+    
+    const char* rows[] = {"1234567890", "QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
+    
+    for (int row = 0; row < 4; row++) {
+        GtkWidget* row_hbox = gtk_hbox_new(TRUE, 3);
+        gtk_box_pack_start(GTK_BOX(keyboard_vbox), row_hbox, FALSE, FALSE, 0);
+        
+        const char* letters = rows[row];
+        for (int i = 0; letters[i] != '\0'; i++) {
+            char letter[2] = {letters[i], '\0'};
+            GtkWidget* key_button = gtk_button_new_with_label(letter);
+            
+            struct KeyData {
+                GtkWidget* entry;
+                char letter;
+            };
+            KeyData* key_data = g_new0(KeyData, 1);
+            key_data->entry = entry;
+            key_data->letter = letters[i];
+            
+            g_signal_connect(key_button, "clicked",
+                           G_CALLBACK(+[](GtkWidget*, gpointer user_data) {
+                               KeyData* kd = (KeyData*)user_data;
+                               const char* current = gtk_entry_get_text(GTK_ENTRY(kd->entry));
+                               std::string text = current ? current : "";
+                               if (text.length() < 10) {
+                                   text += kd->letter;
+                                   gtk_entry_set_text(GTK_ENTRY(kd->entry), text.c_str());
+                               }
+                           }),
+                           key_data);
+            
+            g_signal_connect(key_button, "destroy",
+                           G_CALLBACK(+[](GtkWidget*, gpointer user_data) {
+                               g_free(user_data);
+                           }),
+                           key_data);
+            
+            gtk_box_pack_start(GTK_BOX(row_hbox), key_button, TRUE, TRUE, 0);
+        }
+    }
+    
+    // Space, Backspace, and Clear button row
+    GtkWidget* special_row = gtk_hbox_new(TRUE, 3);
+    gtk_box_pack_start(GTK_BOX(keyboard_vbox), special_row, FALSE, FALSE, 0);
+    
+    GtkWidget* space_button = gtk_button_new_with_label("Space");
+    g_signal_connect(space_button, "clicked",
+                   G_CALLBACK(+[](GtkWidget*, gpointer user_data) {
+                       GtkWidget* entry = (GtkWidget*)user_data;
+                       const char* current = gtk_entry_get_text(GTK_ENTRY(entry));
+                       std::string text = current ? current : "";
+                       if (text.length() < 10) {
+                           text += ' ';
+                           gtk_entry_set_text(GTK_ENTRY(entry), text.c_str());
+                       }
+                   }),
+                   entry);
+    gtk_box_pack_start(GTK_BOX(special_row), space_button, TRUE, TRUE, 0);
+    
+    GtkWidget* backspace_button = gtk_button_new_with_label("Backspace");
+    g_signal_connect(backspace_button, "clicked",
+                   G_CALLBACK(+[](GtkWidget*, gpointer user_data) {
+                       GtkWidget* entry = (GtkWidget*)user_data;
+                       const char* current = gtk_entry_get_text(GTK_ENTRY(entry));
+                       std::string text = current ? current : "";
+                       if (!text.empty()) {
+                           text.pop_back();
+                           gtk_entry_set_text(GTK_ENTRY(entry), text.c_str());
+                       }
+                   }),
+                   entry);
+    gtk_box_pack_start(GTK_BOX(special_row), backspace_button, TRUE, TRUE, 0);
+    
+    GtkWidget* clear_button = gtk_button_new_with_label("Clear");
+    g_signal_connect(clear_button, "clicked",
+                   G_CALLBACK(+[](GtkWidget*, gpointer user_data) {
+                       GtkWidget* entry = (GtkWidget*)user_data;
+                       gtk_entry_set_text(GTK_ENTRY(entry), "");
+                   }),
+                   entry);
+    gtk_box_pack_start(GTK_BOX(special_row), clear_button, TRUE, TRUE, 0);
+    
+    GtkWidget* separator2 = gtk_hseparator_new();
+    gtk_box_pack_start(GTK_BOX(main_vbox), separator2, FALSE, FALSE, 10);
+    
+    GtkWidget* button_align = gtk_alignment_new(0.5, 0.5, 1.0, 0.0);
+    gtk_alignment_set_padding(GTK_ALIGNMENT(button_align), 10, 10, 20, 20);
+    gtk_box_pack_start(GTK_BOX(main_vbox), button_align, FALSE, FALSE, 0);
+    
+    GtkWidget* button_box = gtk_hbox_new(TRUE, 10);
+    gtk_container_add(GTK_CONTAINER(button_align), button_box);
+    
+    GtkWidget* ok_button = gtk_button_new_with_label("OK");
+    gtk_box_pack_start(GTK_BOX(button_box), ok_button, TRUE, TRUE, 0);
+    
+    GtkWidget* cancel_button = gtk_button_new_with_label("Cancel");
+    gtk_box_pack_start(GTK_BOX(button_box), cancel_button, TRUE, TRUE, 0);
+    
+    struct DialogData {
+        GtkWidget* entry;
+        MainWindow* window;
+    };
+    
+    DialogData* data = g_new0(DialogData, 1);
+    data->entry = entry;
+    data->window = this;
+    
+    g_signal_connect(ok_button, "clicked",
+                     G_CALLBACK(+[](GtkWidget* widget, gpointer user_data) {
+                         DialogData* d = (DialogData*)user_data;
+                         const char* name = gtk_entry_get_text(GTK_ENTRY(d->entry));
+                         std::string username = name ? name : "Player";
+                         if (username.empty()) {
+                             username = "Player";
+                         }
+                         
+                         for (char& c : username) {
+                             if (!std::isalnum(c)) {
+                                 c = '_';
+                             }
+                         }
+
+                         MainWindow* window = d->window;
+                         GtkWidget* dialog = gtk_widget_get_toplevel(widget);
+                         gtk_widget_destroy(dialog);
+                         g_free(d);
+
+                         if (window) {
+                             window->add_to_leaderboard(username, window->game_.score());
+                             window->show_leaderboard();
+                         }
+                     }),
+                     data);
+    
+    g_signal_connect(cancel_button, "clicked",
+                     G_CALLBACK(+[](GtkWidget* widget, gpointer user_data) {
+                         DialogData* d = (DialogData*)user_data;
+                         GtkWidget* dialog = gtk_widget_get_toplevel(widget);
+                         if (dialog) {
+                             gtk_widget_destroy(dialog);
+                         }
+                         g_free(d);
+                     }),
+                     data);
+    
+    gtk_widget_show_all(dialog);
 }

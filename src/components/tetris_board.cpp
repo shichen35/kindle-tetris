@@ -1,7 +1,6 @@
 #include "tetris_board.hpp"
 
 #include <algorithm>
-#include <iostream>
 
 namespace {
 
@@ -104,12 +103,6 @@ void TetrisBoard::on_board_size_allocate(GtkAllocation* allocation) {
     if (!allocation) {
         return;
     }
-    if (auto* toplevel = gtk_widget_get_toplevel(board_widget_); GTK_IS_WINDOW(toplevel)) {
-        int win_width = 0;
-        int win_height = 0;
-        gtk_window_get_size(GTK_WINDOW(toplevel), &win_width, &win_height);
-        std::cout << "Main window resized to " << win_width << "x" << win_height << std::endl;
-    }
     update_block_size_from_allocation(*allocation);
 }
 
@@ -168,7 +161,7 @@ void TetrisBoard::render_grid(GtkWidget* widget,
                         draw_cell(cr, x, y, color);
                     }
                 } else if (draw_grid) {
-                    cairo_set_source_rgb(cr, 0.9, 0.9, 0.9);
+                    cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
                     cairo_rectangle(cr, x * block_size_, y * block_size_, block_size_, block_size_);
                     cairo_stroke(cr);
                 }
@@ -177,7 +170,7 @@ void TetrisBoard::render_grid(GtkWidget* widget,
     } else if (draw_grid) {
         for (int y = 0; y < rows; ++y) {
             for (int x = 0; x < cols; ++x) {
-                cairo_set_source_rgb(cr, 0.9, 0.9, 0.9);
+                cairo_set_source_rgb(cr, 0.6, 0.6, 0.6);
                 cairo_rectangle(cr, x * block_size_, y * block_size_, block_size_, block_size_);
                 cairo_stroke(cr);
             }
